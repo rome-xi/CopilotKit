@@ -2367,6 +2367,7 @@ describe("ProxiedCopilotRuntimeAgent (intelligence mode)", () => {
       type: EventType.STATE_SNAPSHOT,
       snapshot: { current: true },
     });
+    channel.serverPush("replay_complete", {});
     await flushAsyncWork();
     expect(agent.isRunning).toBe(true);
     releaseOld();

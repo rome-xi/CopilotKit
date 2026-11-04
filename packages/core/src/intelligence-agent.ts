@@ -42,6 +42,7 @@ import {
   stripIntelligenceRoutingFields,
 } from "@copilotkit/shared";
 import { ɵconnectWithoutEventVerification } from "./utils/connect-replay";
+import { ReplayHold } from "./utils/replay-hold";
 import {
   ɵphoenixChannel$,
   ɵphoenixSocket$,
@@ -193,6 +194,8 @@ export class IntelligenceAgent extends AbstractAgent {
   private config: IntelligenceAgentConfig;
   private socket: Socket | null = null;
   private activeChannel: Channel | null = null;
+  // The replay hold of the connect in flight, if any.
+  private activeReplayHold: ReplayHold<BaseEvent> | null = null;
   private canonicalRunId: string | null = null;
   private sharedState: IntelligenceAgentSharedState;
 
@@ -281,6 +284,18 @@ export class IntelligenceAgent extends AbstractAgent {
       subscriber,
       (input, lifecycle) => this.connect(input, lifecycle),
     );
+  }
+
+  /**
+   * Detaching ends the connect stream. Events its replay hold still holds
+   * were already received, and the replay cursor has moved past them, so they
+   * are handed on first and applied like any event that arrived before the
+   * detach. Dropping them would lose them: the next connect resumes after
+   * them.
+   */
+  override async detachActiveRun(): Promise<void> {
+    this.activeReplayHold?.release();
+    return super.detachActiveRun();
   }
 
   abortRun(): void {
@@ -768,12 +783,21 @@ export class IntelligenceAgent extends AbstractAgent {
         applied: null,
         replayFailed: false,
       };
+      // A connect holds its replayed history and passes it on in one burst
+      // when the replay ends (see ReplayHold). It is released on
+      // replay_complete, replay_failed or stream_idle, and when the stream
+      // ends; a rejoin starts holding again for the replay that follows.
+      const replayHold = new ReplayHold<BaseEvent>(
+        options.streamMode === "connect",
+      );
+      this.activeReplayHold = replayHold;
       const replayFailed$ = channel$.pipe(
         switchMapOperator(({ channel }) =>
           this.observeChannelEvent$<unknown>(channel, REPLAY_FAILED_EVENT),
         ),
         tap(() => {
           controlCursor.replayFailed = true;
+          replayHold.release();
         }),
       );
       // Controls are scoped to each replay epoch, not cached across rejoin.
@@ -785,6 +809,9 @@ export class IntelligenceAgent extends AbstractAgent {
       ).pipe(
         // Notify before idle completion can unsubscribe other observers.
         tap(() => {
+          // Hand on the held history before the phase changes: these events
+          // are history, and a RUN_ERROR among them must not count as live.
+          replayHold.release();
           replayFinished = true;
           scheduleIdleWarning();
           options.lifecycle?.onReplayFinished?.();
@@ -796,7 +823,10 @@ export class IntelligenceAgent extends AbstractAgent {
         channel$,
         STREAM_IDLE_EVENT,
         controlCursor,
-      ).pipe(share());
+      ).pipe(
+        tap(() => replayHold.release()),
+        share(),
+      );
       const replayRestart$ = merge(
         this.observeControlEvent$(
           input.threadId,
@@ -812,6 +842,7 @@ export class IntelligenceAgent extends AbstractAgent {
           replayFinished = false;
           warnedAboutIdle = false;
           clearIdleWarning();
+          if (options.streamMode === "connect") replayHold.hold();
           options.lifecycle?.onReplayStarted?.();
         }),
         share(),
@@ -868,7 +899,9 @@ export class IntelligenceAgent extends AbstractAgent {
         this.observeSocketHealth$(socket$, options.onSocketOpen).pipe(
           takeUntil(terminal$),
         ),
-        threadEvents$.pipe(takeUntil(streamIdleCompletion$)),
+        replayHold.through(
+          threadEvents$.pipe(takeUntil(streamIdleCompletion$)),
+        ),
         streamIdleCompletion$.pipe(
           ignoreElements(),
           takeUntil(threadCompleted$),
@@ -876,6 +909,9 @@ export class IntelligenceAgent extends AbstractAgent {
       ).pipe(
         finalize(() => {
           clearIdleWarning();
+          if (this.activeReplayHold === replayHold) {
+            this.activeReplayHold = null;
+          }
           this.cleanupOwned(ownChannel, ownSocket);
         }),
       );
