@@ -26,6 +26,18 @@ describe("ReplayHold", () => {
     expect(seen).toEqual([1, 2, 3]);
   });
 
+  it("drops what it held on discard() and passes later values through", () => {
+    const source = new Subject<number>();
+    const hold = new ReplayHold<number>(true);
+    const { seen } = collect(hold, source);
+    source.next(1);
+    source.next(2);
+    hold.discard();
+    source.next(3);
+    hold.release();
+    expect(seen).toEqual([3]);
+  });
+
   it("holds again after hold() and keeps the order across a rejoin", () => {
     const source = new Subject<number>();
     const hold = new ReplayHold<number>(true);

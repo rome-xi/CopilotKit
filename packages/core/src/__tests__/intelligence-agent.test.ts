@@ -1881,6 +1881,38 @@ describe("IntelligenceAgent", () => {
       await expectConnectAgentToResolve(secondConnectPromise);
     });
 
+    it("drops history the gateway streamed before replay_failed", async () => {
+      mockFetch.mockResolvedValueOnce(await jsonResponse(runtimeCredentials()));
+
+      const agent = createAgent();
+      setThreadIdForTest(agent, "thread-1");
+
+      const connectPromise = agent.connectAgent({ runId: "run-1" });
+      await waitForConnection(agent);
+
+      // The gateway streams the replay run by run and fails partway. It
+      // repeats the prior cursor, so the next join sends all of it again.
+      const channel = getChannel(agent)!;
+      channel.triggerJoin("ok");
+      channel.serverPush("ag_ui_event", {
+        type: EventType.RUN_STARTED,
+        threadId: "thread-1",
+        run_id: "backend-run-old",
+        input: {
+          messages: [{ id: "history-1", role: "user", content: "streamed" }],
+        },
+        metadata: { cpki_event_id: "history-event", cpki_event_seq: 1 },
+      } as BaseEvent);
+      channel.serverPush("replay_failed", { reason: "crash" });
+      channel.serverPush("replay_complete", { latestEventId: "prior-cursor" });
+      channel.serverPush("stream_idle", { latestEventId: "prior-cursor" });
+      await expectConnectAgentToResolve(connectPromise);
+
+      expect(agent.messages.map((message) => message.id)).not.toContain(
+        "history-1",
+      );
+    });
+
     it("keeps the durable event cursor when control events only carry ingestion ids", async () => {
       mockFetch
         .mockResolvedValueOnce(await jsonResponse(runtimeCredentials()))

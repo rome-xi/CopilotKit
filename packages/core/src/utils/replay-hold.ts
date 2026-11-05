@@ -14,7 +14,8 @@ import { Observable } from "rxjs";
  * them on in arrival order, synchronously, and later values go straight
  * through until `hold()` is called again (a new replay after a rejoin). When
  * the wrapped stream completes or errors, what is held is released first, so
- * nothing is lost.
+ * nothing is lost. `discard()` drops what is held instead, for a replay that
+ * failed and will be sent again.
  */
 export class ReplayHold<T> {
   private held: T[] | undefined;
@@ -35,6 +36,16 @@ export class ReplayHold<T> {
     this.held = undefined;
     if (!held || !this.deliver) return;
     for (const value of held) this.deliver(value);
+  }
+
+  /**
+   * Drop everything held and stop holding. For a replay the gateway reports
+   * failed: it then repeats the prior cursor, so the next join replays the
+   * same history again, and applying the part received now would apply it
+   * twice.
+   */
+  discard(): void {
+    this.held = undefined;
   }
 
   /** `source$`, held or passed through as this hold says. One subscriber at a time. */

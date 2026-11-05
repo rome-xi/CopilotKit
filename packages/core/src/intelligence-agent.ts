@@ -785,8 +785,11 @@ export class IntelligenceAgent extends AbstractAgent {
       };
       // A connect holds its replayed history and passes it on in one burst
       // when the replay ends (see ReplayHold). It is released on
-      // replay_complete, replay_failed or stream_idle, and when the stream
-      // ends; a rejoin starts holding again for the replay that follows.
+      // replay_complete or stream_idle, and when the stream ends; a rejoin
+      // starts holding again for the replay that follows. On replay_failed
+      // the gateway may already have streamed part of the history; it
+      // repeats the prior cursor so the next join sends all of it again, so
+      // the part held now is dropped rather than applied twice.
       const replayHold = new ReplayHold<BaseEvent>(
         options.streamMode === "connect",
       );
@@ -797,7 +800,7 @@ export class IntelligenceAgent extends AbstractAgent {
         ),
         tap(() => {
           controlCursor.replayFailed = true;
-          replayHold.release();
+          replayHold.discard();
         }),
       );
       // Controls are scoped to each replay epoch, not cached across rejoin.
